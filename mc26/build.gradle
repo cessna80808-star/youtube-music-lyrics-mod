@@ -18,7 +18,7 @@ def sharedSources = layout.buildDirectory.dir('generated/shared')
 
 tasks.register('copyShared', Copy) {
     from('../src/main/java/dev/buffy/ytlyrics') {
-        include 'Lyrics.java', 'NowPlaying.java', 'Spectrum.java'
+        include 'HudConfig.java', 'Lyrics.java', 'NowPlaying.java', 'Spectrum.java'
     }
     into sharedSources.map { it.dir('dev/buffy/ytlyrics') }
 }

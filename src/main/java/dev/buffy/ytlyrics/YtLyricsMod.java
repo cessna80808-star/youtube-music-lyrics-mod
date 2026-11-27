@@ -15,14 +15,23 @@ public class YtLyricsMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        HudConfig.load();
         NowPlaying.start();
 
         KeyBinding visualizer = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.ytlyrics.visualizer", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_V,
                 KeyBinding.Category.create(Identifier.of("ytlyrics", "main"))));
 
+        KeyBinding layout = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.ytlyrics.layout", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_H,
+                KeyBinding.Category.create(Identifier.of("ytlyrics", "main"))));
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (visualizer.wasPressed()) LyricsHud.toggleVisualizer();
+
+            while (layout.wasPressed()) {
+                if (client.player != null && client.currentScreen == null) client.setScreen(new HudEditScreen());
+            }
         });
 
         LOGGER.info("YouTube Music lyrics HUD ready");

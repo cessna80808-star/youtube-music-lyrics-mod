@@ -5,11 +5,12 @@ import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.DrawContext;
 
 /**
- * Animated lyric card above the hotbar: rounded glass panel, karaoke highlight, soft fades.
+ * Animated lyric card above the hotbar: rounded glass panel, karaoke highlight, soft fades, and a
+ * bar visualiser for instrumental tracks.
  *
- * <p>The card is anchored {@link #BOTTOM_MARGIN} pixels above the bottom of the screen, clear of the
- * hotbar and the health/hunger rows, and every line is trimmed to the card's inner width, so nothing
- * is clipped or spills over the HUD at any GUI scale.
+ * <p>The card's centre comes from {@link HudConfig} and the whole card is drawn at
+ * {@link HudConfig#scale()}, so it can be dragged and resized into any corner. Every line is still
+ * trimmed to the card's inner width, so nothing is clipped at any GUI scale.
  */
 public final class LyricsHud {
     private static final int ACCENT_A = 0xFF8B7CFF;
@@ -31,9 +32,6 @@ public final class LyricsHud {
     private static final int CARD_MIN_W = 150;
     private static final int RADIUS = 6;
 
-    /** Card bottom sits this far above the bottom edge: hotbar (22) plus health/hunger rows. */
-    private static final int BOTTOM_MARGIN = 62;
-
     private static final int HEADER_Y = 7;
     private static final int PREV_Y = 22;
     private static final int CURRENT_Y = 35;
@@ -41,6 +39,9 @@ public final class LyricsHud {
 
     private static final float HEADER_SCALE = 0.80f;
     private static final float CONTEXT_SCALE = 0.82f;
+
+    /** Shown while the layout editor is open with nothing playing. */
+    private static final NowPlaying.Track PREVIEW_TRACK = new NowPlaying.Track("Artist", "Track title", 215_000);
 
     // ---- visualiser ----
     private static final Spectrum SPECTRUM = new Spectrum();
@@ -62,6 +63,12 @@ public final class LyricsHud {
     private static long positionMs;
     private static long lengthMs;
 
+    // ---- where the card was last drawn, so the editor can frame it ----
+    private static float boundsX;
+    private static float boundsY;
+    private static float boundsW;
+    private static float boundsH;
+
     private LyricsHud() {}
 
     /** Called by the keybind: instrumental tracks show the bar spectrum instead of a plain chip. */
@@ -70,6 +77,15 @@ public final class LyricsHud {
     }
 
     public static void render(DrawContext context) {
+        draw(context, false);
+    }
+
+    /** Draws the card outside the normal HUD rules, for the layout editor. */
+    public static void renderPreview(DrawContext context) {
+        draw(context, true);
+    }
+
+    private static void draw(DrawContext context, boolean preview) {
         MinecraftClient client = MinecraftClient.getInstance();
         long now = System.nanoTime();
         float dt = lastFrame == 0 ? 0.016f : Math.min(0.1f, (now - lastFrame) / 1_000_000_000f);
@@ -79,17 +95,20 @@ public final class LyricsHud {
         int screenH = client.getWindow().getScaledHeight();
 
         // not in a world, menu open, F1, or a window too short for the card to clear the hotbar
-        if (client.player == null || client.currentScreen != null || client.options.hudHidden
-                || screenW < CARD_MIN_W + 8 || screenH < CARD_H + 80) {
+        if (client.player == null
+                || (!preview && (client.currentScreen != null || client.options.hudHidden
+                        || screenW < CARD_MIN_W + 8 || screenH < CARD_H + 80))) {
             visibility = 0f;
             return;
         }
 
-        String warning = NowPlaying.warning();
-        if (warning != null) {
-            visibility = approach(visibility, 1f, dt, 12f);
-            drawChip(context, client, warning, smooth(visibility), screenW, screenH, WARNING);
-            return;
+        if (!preview) {
+            String warning = NowPlaying.warning();
+            if (warning != null) {
+                visibility = approach(visibility, 1f, dt, 12f);
+                drawChip(context, client, warning, smooth(visibility), screenW, screenH, WARNING);
+                return;
+            }
         }
 
         NowPlaying.Track track = NowPlaying.current();
@@ -125,22 +144,33 @@ public final class LyricsHud {
             lengthMs = track.lengthMs();
         }
 
-        visibility = approach(visibility, live || notice != null || spectrum ? 1f : 0f, dt, 11f);
+        visibility = preview
+                ? 1f
+                : approach(visibility, live || notice != null || spectrum ? 1f : 0f, dt, 11f);
         float alpha = smooth(visibility);
 
-        if (notice != null) {
-            drawChip(context, client, notice, alpha, screenW, screenH, DIM);
-            return;
-        }
-        if (spectrum) {
-            SPECTRUM.track(track.artist() + "|" + track.title());
-            drawVisualizer(context, client, track, alpha, dt, screenW, screenH);
-            return;
-        }
-        if (alpha <= 0.02f || lyrics == null || index < 0 || index >= lyrics.lines().size()) return;
+        int cx = Math.round(screenW * HudConfig.x());
+        int cy = Math.round(screenH * HudConfig.y());
 
+        if (notice != null) {
+            boundsW = 0f;
+            drawChip(context, client, notice, alpha, screenW, screenH, DIM);
+        } else if (spectrum) {
+            SPECTRUM.track(track.artist() + "|" + track.title());
+            drawVisualizer(context, client, track, alpha, dt, cx, cy, screenW, screenH, false);
+        } else if (preview && !live) {
+            // nothing playing: stand in a sample card so the layout can still be arranged
+            drawVisualizer(context, client, PREVIEW_TRACK, 1f, dt, cx, cy, screenW, screenH, true);
+        } else if (alpha > 0.02f && lyrics != null && index >= 0 && index < lyrics.lines().size()) {
+            drawLyrics(context, client, alpha, now, dt, cx, cy, screenW, screenH);
+        } else {
+            boundsW = 0f;
+        }
+    }
+
+    private static void drawLyrics(DrawContext context, MinecraftClient client, float alpha, long now, float dt,
+                                   int cx, int cy, int screenW, int screenH) {
         TextRenderer font = client.textRenderer;
-        int cx = screenW / 2;
         Lyrics.Line current = lyrics.lines().get(index);
 
         int widest = Math.max(font.getWidth(current.text()), Math.round(font.getWidth(header) * HEADER_SCALE));
@@ -148,8 +178,10 @@ public final class LyricsHud {
         cardWidth = approach(cardWidth, targetWidth, dt, 13f);
 
         int w = Math.max(2, Math.round(cardWidth));
+        pushScaled(context, cx, cy);
+
         int x = cx - w / 2;
-        int y = Math.round(screenH - BOTTOM_MARGIN - CARD_H + (1f - alpha) * 8f);
+        int y = Math.round(cy - CARD_H / 2f + (1f - alpha) * 8f);
         int inner = Math.max(20, w - PAD_X * 2);
 
         // shadow, outline, glass body
@@ -198,14 +230,19 @@ public final class LyricsHud {
                 }
             }
         }
+
+        recordBounds(cx, cy, w);
+        popScaled(context);
     }
 
     /** Mirrored bar spectrum for instrumental tracks, drawn on the same glass card as the lyrics. */
     private static void drawVisualizer(DrawContext context, MinecraftClient client, NowPlaying.Track track,
-                                       float alpha, float dt, int screenW, int screenH) {
+                                       float alpha, float dt, int cx, int cy, int screenW, int screenH,
+                                       boolean sample) {
         if (alpha <= 0.02f) return;
 
-        SPECTRUM.update(NowPlaying.positionMs(), dt);
+        long position = sample ? System.currentTimeMillis() % Math.max(1, track.lengthMs()) : NowPlaying.positionMs();
+        SPECTRUM.update(position, dt);
 
         TextRenderer font = client.textRenderer;
         String head = track.artist().isEmpty() ? track.title() : track.title() + "  \u00b7  " + track.artist();
@@ -221,9 +258,10 @@ public final class LyricsHud {
         pillWidth = approach(pillWidth, 0f, dt, 15f);
 
         int w = Math.max(2, Math.round(cardWidth));
-        int x = (screenW - w) / 2;
-        int y = Math.round(screenH - BOTTOM_MARGIN - CARD_H + (1f - alpha) * 8f);
-        int cx = screenW / 2;
+        pushScaled(context, cx, cy);
+
+        int x = cx - w / 2;
+        int y = Math.round(cy - CARD_H / 2f + (1f - alpha) * 8f);
 
         roundedFill(context, x - 2, y + 1, w + 4, CARD_H + 4, RADIUS + 2, withAlpha(SHADOW, alpha), withAlpha(SHADOW, alpha));
         roundedFill(context, x - 1, y - 1, w + 2, CARD_H + 2, RADIUS + 1, withAlpha(BORDER, alpha), withAlpha(BORDER, alpha));
@@ -261,13 +299,16 @@ public final class LyricsHud {
             int barY = y + CARD_H - 8;
             roundedFill(context, barX, barY, trackW, 2, 1, withAlpha(0x26FFFFFF, alpha), withAlpha(0x26FFFFFF, alpha));
             if (track.lengthMs() > 0) {
-                int filled = Math.round(trackW * clamp((float) NowPlaying.positionMs() / track.lengthMs(), 0f, 1f));
+                int filled = Math.round(trackW * clamp((float) position / track.lengthMs(), 0f, 1f));
                 if (filled > 0) {
                     roundedFill(context, barX, barY, filled, 2, 1,
                             withAlpha(ACCENT_A, alpha * 0.95f), withAlpha(ACCENT_B, alpha * 0.95f));
                 }
             }
         }
+
+        recordBounds(cx, cy, w);
+        popScaled(context);
     }
 
     private static void drawChip(DrawContext context, MinecraftClient client, String text,
@@ -277,12 +318,79 @@ public final class LyricsHud {
         TextRenderer font = client.textRenderer;
         String shown = fit(font, text, screenW - 36, 1f);
         int w = font.getWidth(shown) + 24;
-        int x = (screenW - w) / 2;
-        int y = Math.round(screenH - 78 + (1f - alpha) * 6f);
+        int cx = Math.round(screenW * HudConfig.x());
+        int cy = Math.round(screenH * HudConfig.y());
+
+        pushScaled(context, cx, cy);
+
+        int x = cx - w / 2;
+        int y = Math.round(cy - 9 + (1f - alpha) * 6f);
 
         roundedFill(context, x - 1, y - 1, w + 2, 20, 7, withAlpha(BORDER, alpha), withAlpha(BORDER, alpha));
         roundedFill(context, x, y, w, 18, 6, withAlpha(CARD_TOP, alpha), withAlpha(CARD_BOTTOM, alpha));
-        context.drawCenteredTextWithShadow(font, shown, screenW / 2, y + 5, withAlpha(color, alpha));
+        context.drawCenteredTextWithShadow(font, shown, cx, y + 5, withAlpha(color, alpha));
+
+        popScaled(context);
+    }
+
+    /** Layout editor: dimmed world, the live card at its configured place, frame and key hints. */
+    public static void renderEditor(DrawContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        int screenW = client.getWindow().getScaledWidth();
+        int screenH = client.getWindow().getScaledHeight();
+
+        context.fill(0, 0, screenW, screenH, 0x66000000);
+        renderPreview(context);
+
+        if (boundsW > 0.5f) {
+            int bx = Math.round(boundsX) - 3;
+            int by = Math.round(boundsY) - 3;
+            int bw = Math.round(boundsW) + 6;
+            int bh = Math.round(boundsH) + 6;
+            int tint = withAlpha(ACCENT_A, 0.85f);
+            context.fill(bx, by, bx + bw, by + 1, tint);
+            context.fill(bx, by + bh - 1, bx + bw, by + bh, tint);
+            context.fill(bx, by, bx + 1, by + bh, tint);
+            context.fill(bx + bw - 1, by, bx + bw, by + bh, tint);
+        }
+
+        TextRenderer font = client.textRenderer;
+        String title = "Lyrics HUD layout  \u00b7  " + Math.round(HudConfig.scale() * 100f) + "%";
+        String hint = "Drag to move  \u00b7  Scroll to resize  \u00b7  R resets  \u00b7  Esc saves";
+
+        int inner = Math.max(font.getWidth(title), Math.round(font.getWidth(hint) * 0.82f));
+        int w = Math.min(screenW - 24, inner + 32);
+        int x = (screenW - w) / 2;
+        int y = 16;
+
+        roundedFill(context, x - 1, y - 1, w + 2, 42, 7, withAlpha(BORDER, 1f), withAlpha(BORDER, 1f));
+        roundedFill(context, x, y, w, 40, 6, 0xF01A1C26, 0xF011121A);
+        context.fill(x + RADIUS, y + 1, x + w - RADIUS, y + 2, ACCENT_A);
+
+        context.drawCenteredTextWithShadow(font, title, screenW / 2, y + 7, HEADER);
+        scaledCentered(context, font, fit(font, hint, w - 20, 0.82f), screenW / 2, y + 22, 0.82f, CONTEXT);
+    }
+
+    private static void pushScaled(DrawContext context, int cx, int cy) {
+        float scale = HudConfig.scale();
+        context.getMatrices().pushMatrix();
+        if (scale != 1f) {
+            context.getMatrices().translate(cx, cy);
+            context.getMatrices().scale(scale, scale);
+            context.getMatrices().translate(-cx, -cy);
+        }
+    }
+
+    private static void popScaled(DrawContext context) {
+        context.getMatrices().popMatrix();
+    }
+
+    private static void recordBounds(int cx, int cy, int w) {
+        float scale = HudConfig.scale();
+        boundsW = w * scale;
+        boundsH = CARD_H * scale;
+        boundsX = cx - boundsW / 2f;
+        boundsY = cy - boundsH / 2f;
     }
 
     /** Draws the current line word by word, blending each word from dim to bright as it is sung. */

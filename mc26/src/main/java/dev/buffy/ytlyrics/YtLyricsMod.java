@@ -16,14 +16,23 @@ public class YtLyricsMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        HudConfig.load();
         NowPlaying.start();
 
         KeyMapping visualizer = KeyMappingHelper.registerKeyMapping(new KeyMapping(
                 "key.ytlyrics.visualizer", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_V,
                 KeyMapping.Category.register(Identifier.fromNamespaceAndPath("ytlyrics", "main"))));
 
+        KeyMapping layout = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+                "key.ytlyrics.layout", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_H,
+                KeyMapping.Category.register(Identifier.fromNamespaceAndPath("ytlyrics", "main"))));
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (visualizer.consumeClick()) LyricsHud.toggleVisualizer();
+
+            while (layout.consumeClick()) {
+                if (client.player != null && client.gui.screen() == null) client.setScreenAndShow(new HudEditScreen());
+            }
         });
 
         // 26.x draws the HUD into a render state, so this is a registered element rather than a mixin
