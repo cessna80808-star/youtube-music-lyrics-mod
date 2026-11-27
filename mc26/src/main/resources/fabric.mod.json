@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "ytlyrics",
+  "version": "${version}",
+  "name": "YouTube Music Lyrics",
+  "description": "Shows synced lyrics for whatever is playing in YouTube Music (or any MPRIS player) as a HUD overlay, with a bar visualiser for instrumental tracks.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.buffy.ytlyrics.YtLyricsMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": ">=26.2",
+    "java": ">=25"
+  }
+}

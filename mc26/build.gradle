@@ -1,0 +1,62 @@
+plugins {
+    // Minecraft 26.x ships unobfuscated, so this is Loom's non-remapping plugin:
+    // no mappings line, plain implementation, and a plain jar instead of remapJar.
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+// Lyrics, NowPlaying and Spectrum are plain Java and shared with the 1.21.11 project; they are
+// copied into the build directory so this jar always carries the same lyric logic. The HUD and
+// the entrypoint use per-version names and live here.
+def sharedSources = layout.buildDirectory.dir('generated/shared')
+
+tasks.register('copyShared', Copy) {
+    from('../src/main/java/dev/buffy/ytlyrics') {
+        include 'Lyrics.java', 'NowPlaying.java', 'Spectrum.java'
+    }
+    into sharedSources.map { it.dir('dev/buffy/ytlyrics') }
+}
+
+sourceSets {
+    main {
+        java {
+            srcDir sharedSources
+        }
+    }
+}
+
+tasks.named('compileJava') {
+    dependsOn 'copyShared'
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filteringCharset "UTF-8"
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = "UTF-8"
+    it.options.release = 25
+}
+
+java {
+    if (JavaVersion.current() < JavaVersion.VERSION_25) {
+        toolchain.languageVersion = JavaLanguageVersion.of(25)
+    }
+}
