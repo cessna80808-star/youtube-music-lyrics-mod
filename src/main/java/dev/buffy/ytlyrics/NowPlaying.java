@@ -118,7 +118,11 @@ public final class NowPlaying {
         String artist = fields[2].trim();
         String title = fields[3].trim();
 
-        // browser tabs often expose only "Song - Artist" as the title
+        // browser tabs report "Song | YouTube Music"
+        int bar = title.lastIndexOf(" | ");
+        if (bar > 0) title = title.substring(0, bar).trim();
+
+        // and often expose only "Song - Artist" as the title
         if (artist.isEmpty()) {
             int split = title.lastIndexOf(" - ");
             if (split > 0) {

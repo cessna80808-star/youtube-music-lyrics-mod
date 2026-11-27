@@ -79,16 +79,18 @@ public final class LyricsHud {
         String warning = NowPlaying.warning();
         if (warning != null) {
             visibility = approach(visibility, 1f, dt, 12f);
-            drawWarning(context, client, warning, smooth(visibility), screenW, screenH);
+            drawChip(context, client, warning, smooth(visibility), screenW, screenH, WARNING);
             return;
         }
 
         NowPlaying.Track track = NowPlaying.current();
         Lyrics loaded = track == null ? null : Lyrics.get(track);
-        int playing = loaded == null || loaded.instrumental() || loaded.lines().isEmpty()
-                ? -1
-                : loaded.indexAt(NowPlaying.positionMs());
+        boolean ready = loaded != null && !loaded.instrumental() && !loaded.lines().isEmpty();
+        int playing = ready ? loaded.indexAt(NowPlaying.positionMs()) : -1;
         boolean live = playing >= 0;
+
+        // a match that has no timed lyrics is worth saying out loud, otherwise the HUD looks broken
+        String notice = !live && loaded != null ? (loaded.instrumental() ? "Instrumental" : "No lyrics for this track") : null;
 
         if (live) {
             String key = track.artist() + "|" + track.title();
@@ -110,8 +112,13 @@ public final class LyricsHud {
             lengthMs = track.lengthMs();
         }
 
-        visibility = approach(visibility, live ? 1f : 0f, dt, 11f);
+        visibility = approach(visibility, live || notice != null ? 1f : 0f, dt, 11f);
         float alpha = smooth(visibility);
+
+        if (notice != null) {
+            drawChip(context, client, notice, alpha, screenW, screenH, DIM);
+            return;
+        }
         if (alpha <= 0.02f || lyrics == null || index < 0 || index >= lyrics.lines().size()) return;
 
         TextRenderer font = client.textRenderer;
@@ -175,8 +182,8 @@ public final class LyricsHud {
         }
     }
 
-    private static void drawWarning(DrawContext context, MinecraftClient client, String text,
-                                    float alpha, int screenW, int screenH) {
+    private static void drawChip(DrawContext context, MinecraftClient client, String text,
+                                 float alpha, int screenW, int screenH, int color) {
         if (alpha <= 0.02f) return;
 
         TextRenderer font = client.textRenderer;
@@ -187,7 +194,7 @@ public final class LyricsHud {
 
         roundedFill(context, x - 1, y - 1, w + 2, 20, 7, withAlpha(BORDER, alpha), withAlpha(BORDER, alpha));
         roundedFill(context, x, y, w, 18, 6, withAlpha(CARD_TOP, alpha), withAlpha(CARD_BOTTOM, alpha));
-        context.drawCenteredTextWithShadow(font, shown, screenW / 2, y + 5, withAlpha(WARNING, alpha));
+        context.drawCenteredTextWithShadow(font, shown, screenW / 2, y + 5, withAlpha(color, alpha));
     }
 
     /** Draws the current line word by word, blending each word from dim to bright as it is sung. */

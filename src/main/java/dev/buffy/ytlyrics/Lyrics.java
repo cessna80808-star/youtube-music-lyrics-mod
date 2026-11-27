@@ -35,10 +35,15 @@ public final class Lyrics {
     private static final Set<String> NOISE_WORDS =
             Set.of("official", "video", "audio", "lyric", "lyrics", "visualizer", "remaster", "remastered", "hd", "4k", "mv");
 
-    private static final Map<String, Lyrics> CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, Entry> CACHE = new ConcurrentHashMap<>();
     private static final Set<String> LOADING = ConcurrentHashMap.newKeySet();
-    private static final Lyrics NONE = new Lyrics(List.of(), false);
+
+    /** A failed lookup is retried after this long instead of blanking the track for the session. */
+    private static final long RETRY_MS = 15_000L;
+
     private static final HttpClient HTTP = HttpClient.newHttpClient();
+
+    private record Entry(Lyrics lyrics, long retryAt) { }
     private static final ExecutorService IO = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "ytlyrics-lrclib");
         thread.setDaemon(true);
@@ -56,19 +61,23 @@ public final class Lyrics {
     /** Cached lyrics for the track, or null while the first request is still in flight. */
     public static Lyrics get(NowPlaying.Track track) {
         String key = key(track);
-        Lyrics cached = CACHE.get(key);
-        if (cached != null) return cached == NONE ? null : cached;
+        Entry cached = CACHE.get(key);
+        if (cached != null) {
+            if (cached.lyrics() != null) return cached.lyrics();
+            if (System.currentTimeMillis() < cached.retryAt()) return null;
+        }
         if (!LOADING.add(key)) return null;
 
         IO.execute(() -> {
-            Lyrics fetched;
+            Lyrics fetched = null;
             try {
                 fetched = download(track);
             } catch (Exception e) {
-                fetched = null;
+                YtLyricsMod.LOGGER.warn("ytlyrics: LRCLib lookup failed for {} - {}", track.artist(), track.title(), e);
             }
-            CACHE.put(key, fetched == null ? NONE : fetched);
-            if (CACHE.size() > 32) CACHE.entrySet().removeIf(e -> e.getValue() == NONE);
+
+            CACHE.put(key, new Entry(fetched, System.currentTimeMillis() + RETRY_MS));
+            if (CACHE.size() > 32) CACHE.entrySet().removeIf(e -> e.getValue().lyrics() == null);
             LOADING.remove(key);
         });
 
@@ -99,10 +108,22 @@ public final class Lyrics {
     }
 
     private static Lyrics download(NowPlaying.Track track) throws Exception {
-        StringBuilder url = new StringBuilder("https://lrclib.net/api/search?track_name=")
-                .append(URLEncoder.encode(clean(track.title()), StandardCharsets.UTF_8));
-
+        String title = clean(track.title());
         String artist = clean(track.artist());
+
+        Lyrics lyrics = pick(search(title, artist), track);
+
+        // browser titles are messy and the artist guess can be wrong: retry on the title alone
+        if (lyrics == null && !artist.isEmpty()) {
+            lyrics = pick(search(title, ""), track);
+        }
+        return lyrics;
+    }
+
+    private static JsonArray search(String title, String artist) throws Exception {
+        StringBuilder url = new StringBuilder("https://lrclib.net/api/search?track_name=")
+                .append(URLEncoder.encode(title, StandardCharsets.UTF_8));
+
         if (!artist.isEmpty()) {
             url.append("&artist_name=").append(URLEncoder.encode(artist, StandardCharsets.UTF_8));
         }
@@ -114,24 +135,68 @@ public final class Lyrics {
                 .build();
 
         HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) return null;
+        if (response.statusCode() != 200) return new JsonArray();
+        return JsonParser.parseString(response.body()).getAsJsonArray();
+    }
 
-        JsonArray results = JsonParser.parseString(response.body()).getAsJsonArray();
-
-        JsonObject synced = null;
-        JsonObject plain = null;
+    /**
+     * Picks the version that actually matches this track. Taking the first synced hit lines up lyrics
+     * from a radio edit, live take or remix, which reads as badly out-of-sync karaoke.
+     */
+    private static Lyrics pick(JsonArray results, NowPlaying.Track track) {
+        JsonObject bestSynced = null;
+        JsonObject bestPlain = null;
+        double syncedScore = Double.MAX_VALUE;
+        double plainScore = Double.MAX_VALUE;
         boolean instrumental = false;
 
         for (JsonElement element : results) {
             JsonObject entry = element.getAsJsonObject();
-            if (entry.get("instrumental").getAsBoolean()) instrumental = true;
-            if (synced == null && has(entry, "syncedLyrics")) synced = entry;
-            if (plain == null && has(entry, "plainLyrics")) plain = entry;
+            if (entry.has("instrumental") && entry.get("instrumental").getAsBoolean()) instrumental = true;
+
+            boolean synced = has(entry, "syncedLyrics");
+            boolean plain = has(entry, "plainLyrics");
+            if (!synced && !plain) continue;
+
+            double score = mismatch(entry, track);
+            if (synced && score < syncedScore) {
+                syncedScore = score;
+                bestSynced = entry;
+            }
+            if (plain && score < plainScore) {
+                plainScore = score;
+                bestPlain = entry;
+            }
         }
 
-        if (synced != null) return new Lyrics(parseLrc(synced.get("syncedLyrics").getAsString()), false);
-        if (plain != null) return new Lyrics(unsynced(plain.get("plainLyrics").getAsString(), track.lengthMs()), false);
+        if (bestSynced != null) {
+            List<Line> lines = parseLrc(bestSynced.get("syncedLyrics").getAsString());
+            if (!lines.isEmpty()) return new Lyrics(lines, false);
+        }
+        if (bestPlain != null) {
+            return new Lyrics(unsynced(bestPlain.get("plainLyrics").getAsString(), track.lengthMs()), false);
+        }
         return instrumental ? new Lyrics(List.of(), true) : null;
+    }
+
+    /** How badly a result differs from what is playing: wrong title, then wrong length in seconds. */
+    private static double mismatch(JsonObject entry, NowPlaying.Track track) {
+        double score = 0;
+
+        if (entry.has("trackName") && !entry.get("trackName").isJsonNull()
+                && !fold(entry.get("trackName").getAsString()).equals(fold(clean(track.title())))) {
+            score += 4;
+        }
+
+        long length = track.lengthMs();
+        if (length > 0 && entry.has("duration") && entry.get("duration").isJsonPrimitive()) {
+            score += Math.min(30, Math.abs(entry.get("duration").getAsDouble() - length / 1000.0));
+        }
+        return score;
+    }
+
+    private static String fold(String text) {
+        return text.toLowerCase().replaceAll("[^a-z0-9]", "");
     }
 
     private static boolean has(JsonObject entry, String field) {
@@ -203,6 +268,10 @@ public final class Lyrics {
         }
 
         matcher.appendTail(cleaned);
-        return cleaned.toString().replaceAll("\\s+", " ").trim();
+
+        // browser tab titles arrive as "Song | YouTube Music"
+        return cleaned.toString()
+                .replaceAll("(?i)\\s*[|\\-\u2013\u2014]\\s*(youtube music|yt music|youtube)\\s*$", "")
+                .replaceAll("\\s+", " ").trim();
     }
 }
